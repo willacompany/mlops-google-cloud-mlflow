@@ -172,7 +172,8 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             description=config.get("description"),
             encryption_spec_key_name=config.get("encryption_spec_key_name"),
             labels={
-                "google_cloud_mlflow_plugin_version": "0.0.1",
+                "managed_by": "model-deployer",
+                "model_version": model_uri.split('/')[-1]
             },
         )
         endpoint.deploy(
@@ -236,7 +237,7 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             contain a 'name' key containing the deployment name. The other fields of
             the returned dictionary and their types may vary across deployment targets.
         """
-        endpoints = aiplatform.Endpoint.list(filter='labels.google_cloud_mlflow_plugin_version:*')
+        endpoints = aiplatform.Endpoint.list(filter='labels.managed_by=model-deployer')
         endpoint_dicts = list(map(_resource_to_mlflow_dict, endpoints))
         return endpoint_dicts
 
