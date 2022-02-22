@@ -179,6 +179,10 @@ def upload_mlflow_model_to_vertex_ai_models(
                 display_name=display_name,
                 project=project,
                 location=location,
+                labels={
+                    "managed_by": "model-deployer",
+                    "model_version": model_uri.split('/')[-1]
+                }
             )
             return vertex_model.resource_name
         if flavor_name == "tensorflow":

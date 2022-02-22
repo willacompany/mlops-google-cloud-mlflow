@@ -38,14 +38,13 @@ try:
 except ImportError:
     from google.cloud.aiplatform import aiplatform  # pylint:disable=g-import-not-at-top
 
-
 _logger = logging.getLogger(__name__)
 
-DEFAULT_MACHINE_TYPE="n1-standard-2"
+DEFAULT_MACHINE_TYPE = "n1-standard-2"
 
 
 def _resource_to_mlflow_dict(
-    resource: aiplatform.base.VertexAiResourceNoun,
+        resource: aiplatform.base.VertexAiResourceNoun,
 ) -> Dict[str, Any]:
     """Converts Vertex AI resource instance to a MLflow dict."""
     # TODO(avolkov): Switch to .to_dict() method when my PR is merged:
@@ -61,7 +60,7 @@ def _resource_to_mlflow_dict(
 
 
 def _data_to_list_of_instances(
-    data: Union[list, numpy.ndarray, pandas.DataFrame]
+        data: Union[list, numpy.ndarray, pandas.DataFrame]
 ) -> List:
     if isinstance(data, pandas.DataFrame):
         return data.values.tolist()
@@ -76,11 +75,11 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
     """The Google Cloud Vertex AI implementation of the BaseDeploymentClient."""
 
     def create_deployment(
-        self,
-        name: str,
-        model_uri: str,
-        flavor: Optional[str] = None,
-        config: Optional[Dict[str, str]] = None,
+            self,
+            name: str,
+            model_uri: str,
+            flavor: Optional[str] = None,
+            config: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Deploys the model.
 
@@ -173,7 +172,6 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             encryption_spec_key_name=config.get("encryption_spec_key_name"),
             labels={
                 "managed_by": "model-deployer",
-                "model_version": model_uri.split('/')[-1]
             },
         )
         endpoint.deploy(
@@ -191,8 +189,10 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             accelerator_type=config.get("accelerator_type"),
             accelerator_count=int(config.get("accelerator_count", 0)) or None,
             service_account=config.get("service_account"),
-            explanation_metadata=(json.loads(config.get("explanation_metadata")) if "explanation_metadata" in config else None),
-            explanation_parameters=(json.loads(config.get("explanation_parameters")) if "explanation_parameters" in config else None),
+            explanation_metadata=(
+                json.loads(config.get("explanation_metadata")) if "explanation_metadata" in config else None),
+            explanation_parameters=(
+                json.loads(config.get("explanation_parameters")) if "explanation_parameters" in config else None),
             sync=json.loads(config.get("sync", "true")),
         )
 
@@ -216,7 +216,7 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
         return _resource_to_mlflow_dict(
             self._get_deployment(deployment_name=name)
         )
-    
+
     def _get_deployment(self, deployment_name: str) -> aiplatform.Endpoint:
         endpoints = aiplatform.Endpoint.list(filter=f'display_name="{deployment_name}"')
         if len(endpoints) > 1:
@@ -264,12 +264,114 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             endpoint = endpoints[0]
             endpoint.delete(force=True)
 
+    def get_endpoint(self, name) -> Optional[aiplatform.Endpoint]:
+        endpoints = aiplatform.Endpoint.list(filter=f'display_name="{name}"')
+        if endpoints:
+            return endpoints[0]
+
+    def get_endpoint_models(self, name):
+        endpoint = self.get_endpoint(name)
+        return endpoint.list_models()
+
+    def _extract_model_id(self, name):
+        return name.split('/')[-1]
+
+    def get_endpoint_version(self, name):
+        models = self.get_endpoint_models(name)
+        endpoint_model_id = self._extract_model_id(models[0].model)
+        return aiplatform.Model.list(filter=f'model={endpoint_model_id}')[0].labels['model_version']
+
+    def get_uploaded_model(self, name, version) -> Optional[aiplatform.Model]:
+        model_list = aiplatform.Model.list(filter=f'display_name="{name}" AND labels.model_version="{version}"')
+        if model_list:
+            return model_list[0]
+    def is_model_uploaded(self, name, version):
+        return self.get_uploaded_model(name, version) is not None
+        
+    def is_model_deployed(self, endpoint_name, model_version):
+        endpoint = self.get_endpoint(endpoint_name)
+        if not endpoint:
+            return False
+        else:
+            models = self.get_endpoint_models(endpoint_name)
+            if len(models) == 0:
+                return False
+            endpoint_model_id = self._extract_model_id(models[0].model) # FIXME: assuming 1 model only no A/B scenarios
+            return len( aiplatform.Model.list(filter=f'labels.model_version="{version}" AND model={endpoint_model_id}')) > 0
+    
+    def update_deployment_inplace(
+            self,
+            name: str,
+            model_uri: Optional[str] = None,
+            flavor: Optional[str] = None,
+            config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        config = config or {}
+        # FIXME: For now we do not support more than 1 model per endpoint -
+        #  so no A/B scenarios with traffic split allowed.
+        aiplatform.init(
+            project=config.get("project"),
+            location=config.get("location"),
+            experiment=config.get("experiment"),
+            experiment_description=config.get("experiment_description"),
+            staging_bucket=config.get("staging_bucket"),
+            encryption_spec_key_name=config.get("encryption_spec_key_name"),
+        )
+        existing_endpoints = aiplatform.Endpoint.list(filter=f'display_name="{name}"')
+        if not existing_endpoints:
+            raise mlflow.exceptions.MlflowException(
+                f"No existing endpoint with name {name} found.")
+        endpoint = existing_endpoints[0]
+        requested_model_version = model_uri.split('/')[-1]
+        is_model_uploaded = self.is_model_uploaded(name, requested_model_version)
+        model_name = config.get("model_resource_name")
+        if not model_name and not is_model_uploaded:
+            model_name = vertex_utils.upload_mlflow_model_to_vertex_ai_models(
+                model_uri=model_uri,
+                display_name=name,
+                destination_image_uri=config.get("destination_image_uri"),
+                timeout=int(config.get("timeout", 1800)),
+            )
+        elif is_model_uploaded:
+            model_name = self.get_uploaded_model(name, requested_model_version ).resource_name
+        # FIXME: just undeploy all models no support for A/B scenarios
+        traffic_split = endpoint.traffic_split
+        for model_id in traffic_split.keys():
+            aiplatform.Model.list()
+            endpoint.undeploy(model_id)
+        endpoint.deploy(
+            model=aiplatform.Model(model_name=model_name),
+            deployed_model_display_name=name,
+            traffic_percentage=100,
+            # Need to always specify the machine type to prevent this error:
+            # InvalidArgument: 400 'automatic_resources' is not supported for Model
+            # The choice between "dedicated_resources" and "automatic_resources"
+            # (only supported with AutoML models) is based on the presence of
+            # machine_type.
+            machine_type=config.get("machine_type", DEFAULT_MACHINE_TYPE),
+            min_replica_count=int(config.get("min_replica_count", 1)),
+            max_replica_count=int(config.get("max_replica_count", 1)),
+            accelerator_type=config.get("accelerator_type"),
+            accelerator_count=int(config.get("accelerator_count", 0)) or None,
+            service_account=config.get("service_account"),
+            explanation_metadata=(
+                json.loads(config.get("explanation_metadata")) if "explanation_metadata" in config else None),
+            explanation_parameters=(
+                json.loads(config.get("explanation_parameters")) if "explanation_parameters" in config else None),
+            sync=json.loads(config.get("sync", "true")),
+
+        )
+        deployment_dict = _resource_to_mlflow_dict(endpoint)
+        deployment_dict["flavor"] = flavor
+        return deployment_dict
+
+
     def update_deployment(
-        self,
-        name: str,
-        model_uri: Optional[str] = None,
-        flavor: Optional[str] = None,
-        config: Optional[Dict[str, Any]] = None,
+            self,
+            name: str,
+            model_uri: Optional[str] = None,
+            flavor: Optional[str] = None,
+            config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Updates the deployment with the specified name.
 
@@ -303,9 +405,9 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
         )
 
     def predict(
-        self,
-        deployment_name: str,
-        df: Union[List, numpy.ndarray, pandas.DataFrame],
+            self,
+            deployment_name: str,
+            df: Union[List, numpy.ndarray, pandas.DataFrame],
     ) -> Union[pandas.DataFrame, pandas.Series, numpy.ndarray, Dict[str, Any]]:
         """Computes model predictions.
 
@@ -342,9 +444,9 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
         return predictions
 
     def explain(
-        self,
-        deployment_name: str,
-        df: Union[List, numpy.ndarray, pandas.DataFrame],
+            self,
+            deployment_name: str,
+            df: Union[List, numpy.ndarray, pandas.DataFrame],
     ) -> Union[pandas.DataFrame, pandas.Series, numpy.ndarray, Dict[str, Any]]:
         """Generates explanations of model predictions.
 
@@ -382,10 +484,10 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
 
 
 def run_local(
-    name: str,
-    model_uri: str,
-    flavor: Optional[str] = None,
-    config: Optional[Dict[str, str]] = None,
+        name: str,
+        model_uri: str,
+        flavor: Optional[str] = None,
+        config: Optional[Dict[str, str]] = None,
 ):
     """Deploys the specified model locally, for testing.
 
