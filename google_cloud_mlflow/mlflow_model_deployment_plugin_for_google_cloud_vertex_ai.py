@@ -271,15 +271,17 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
 
     def get_endpoint_models(self, name):
         endpoint = self.get_endpoint(name)
-        return endpoint.list_models()
+        if endpoint:
+            return endpoint.list_models()
 
     def _extract_model_id(self, name):
         return name.split('/')[-1]
 
     def get_endpoint_version(self, name):
         models = self.get_endpoint_models(name)
-        endpoint_model_id = self._extract_model_id(models[0].model)
-        return aiplatform.Model.list(filter=f'model={endpoint_model_id}')[0].labels['model_version']
+        if models:
+            endpoint_model_id = self._extract_model_id(models[0].model)
+            return aiplatform.Model.list(filter=f'model={endpoint_model_id}')[0].labels['model_version']
 
     def get_uploaded_model(self, name, version) -> Optional[aiplatform.Model]:
         model_list = aiplatform.Model.list(filter=f'display_name="{name}" AND labels.model_version="{version}"')
@@ -335,10 +337,7 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
         elif is_model_uploaded:
             model_name = self.get_uploaded_model(name, requested_model_version ).resource_name
         # FIXME: just undeploy all models no support for A/B scenarios
-        traffic_split = endpoint.traffic_split
-        for model_id in traffic_split.keys():
-            aiplatform.Model.list()
-            endpoint.undeploy(model_id)
+        models_to_udeploy = endpoint.traffic_split.keys()
         endpoint.deploy(
             model=aiplatform.Model(model_name=model_name),
             deployed_model_display_name=name,
@@ -361,6 +360,8 @@ class GoogleCloudVertexAiDeploymentClient(deployments.BaseDeploymentClient):
             sync=json.loads(config.get("sync", "true")),
 
         )
+        for model_id in models_to_udeploy:
+            endpoint.undeploy(model_id)
         deployment_dict = _resource_to_mlflow_dict(endpoint)
         deployment_dict["flavor"] = flavor
         return deployment_dict

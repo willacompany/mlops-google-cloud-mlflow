@@ -136,6 +136,7 @@ def upload_mlflow_model_to_vertex_ai_models(
             model_name=model_name,
         )
     """
+    model_version = model_uri.split('/')[-1]
     if not project:
         try:
             _, project = google.auth.default()
@@ -167,6 +168,10 @@ def upload_mlflow_model_to_vertex_ai_models(
                 display_name=display_name,
                 project=project,
                 location=location,
+                labels={
+                    "managed_by": "model-deployer",
+                    "model_version": model_version
+                }
             )
             return vertex_model.resource_name
         if flavor_name == "sklearn":
@@ -181,7 +186,7 @@ def upload_mlflow_model_to_vertex_ai_models(
                 location=location,
                 labels={
                     "managed_by": "model-deployer",
-                    "model_version": model_uri.split('/')[-1]
+                    "model_version": model_version
                 }
             )
             return vertex_model.resource_name
@@ -204,7 +209,7 @@ def upload_mlflow_model_to_vertex_ai_models(
 
     if not destination_image_uri:
         image_name = re.sub("[^-A-Za-z0-9_.]", "_", display_name).lower()
-        destination_image_uri = f"gcr.io/{project}/mlflow/{image_name}"
+        destination_image_uri = f"gcr.io/{project}/mlflow/{image_name}:{model_version}"
         _logger.info(
             "Destination image URI not set. Building and uploading image to %s",
             destination_image_uri,
@@ -236,7 +241,8 @@ def upload_mlflow_model_to_vertex_ai_models(
         project=project,
         location=location,
         labels={
-            "mlflow_model_vertex_ai_deployer": "mlflow_model_vertex_ai_deployer",
+            "managed_by": "model-deployer",
+            "model_version": model_uri.split('/')[-1]
         },
     )
     return uploaded_model.resource_name
